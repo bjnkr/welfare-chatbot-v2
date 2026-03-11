@@ -1,66 +1,44 @@
-import streamlit as st
-import chromadb
-from chromadb.utils.embedding_functions import GoogleGenerativeAiEmbeddingFunction
-from google import genai
-from google.genai import types
-import os
-
-# --- 1. 설정 및 보안 ---
-# Streamlit Cloud의 Secrets 기능을 사용해 API 키를 숨기는 것이 안전합니다.
-# 직접 입력할 경우: API_KEY = "AIza..."
-API_KEY = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else "직접입력"
-
-st.set_page_config(page_title="bjn.kr 복지 챗봇", page_icon="🤖")
-
-# --- 2. 로컬에 저장된 DB 불러오기 ---
-@st.cache_resource
-def init_db():
-    # GitHub에 welfare_backup 폴더를 함께 올렸다고 가정합니다.
-    db_path = "./welfare_backup" 
-    gemini_ef = GoogleGenerativeAiEmbeddingFunction(api_key=API_KEY)
-    db_client = chromadb.PersistentClient(path=db_path)
-    return db_client.get_collection(name="welfare_docs", embedding_function=gemini_ef)
-
-# 초기화
-try:
-    collection = init_db()
-    genai_client = genai.Client(api_key=API_KEY)
-    st.success("복지 지식 창고가 연결되었습니다!")
-except Exception as e:
-    st.error(f"DB 로드 실패: {e}")
-
-# --- 3. 채팅 UI 구현 ---
-st.title("🤖 bjn.kr AI 복지 상담사")
-st.info("366페이지 분량의 2026년 복지 안내서를 학습했습니다.")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
-
-if prompt := st.chat_input():
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("지침서를 확인하고 있습니다..."):
-            # 1. 벡터 DB에서 관련 문구 10개 검색
+with st.spinner("지침서를 꼼꼼히 읽고 있습니다..."):
+            # 1. DB 검색
             results = collection.query(query_texts=[prompt], n_results=10)
+            pages = [m['page_num'] for m in results['metadatas'][0]]
             
-            # 2. 검색된 페이지 번호 추출 (메타데이터 활용)
-            pages = [str(m['page_num']) for m in results['metadatas'][0]]
+            # --- ✨ 핵심 추가 로직: 실제 PDF 추출해서 넘겨주기 ---
+            import io
+            from pypdf import PdfReader, PdfWriter
             
-            # 3. Gemini에게 답변 생성 요청 (이전 테스트 로직 적용)
-            # 여기서는 편의상 간단히 구현하지만, 이전에 성공했던 
-            # PDF 바이트 전송 로직을 결합하면 더 강력해집니다.
+            # 본인이 깃허브에 올린 원본 PDF 파일명으로 변경하세요!
+            PDF_FILENAME = "국민기초생활보장.pdf" 
+            
+            reader = PdfReader(PDF_FILENAME)
+            writer = PdfWriter()
+            
+            # 검색된 페이지 번호에 해당하는 페이지만 쏙쏙 뽑아내기
+            for page_num in pages:
+                idx = int(page_num) - 1 # 파이썬은 0번부터 세기 때문
+                if 0 <= idx < len(reader.pages):
+                    writer.add_page(reader.pages[idx])
+            
+            # 뽑아낸 페이지들을 바이트(메모리) 형태로 변환
+            pdf_bytes_io = io.BytesIO()
+            writer.write(pdf_bytes_io)
+            pdf_bytes = pdf_bytes_io.getvalue()
+            
+            # Gemini에게 넘겨줄 '문서 뭉치' 완성
+            pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+            # ------------------------------------------------
+            
+            # 3. Gemini에게 찐 PDF 데이터와 함께 질문하기!
             response = genai_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[f"지침서 내용 검색 결과: {results['documents'][0]}\n질문: {prompt}"]
+                contents=[
+                    pdf_part,
+                    f"당신은 대한민국 복지 안내 전문가입니다. 제공된 PDF 페이지의 표와 텍스트를 꼼꼼히 분석하여 다음 질문에 대답해 주세요. \n\n질문: {prompt}"
+                ]
             )
             
             answer = response.text
             st.write(answer)
-            st.caption(f"📍 참고 페이지: {', '.join(set(pages))}페이지")
+            st.caption(f"📍 참고 페이지: {', '.join(set([str(p) for p in pages]))}페이지")
             
             st.session_state.messages.append({"role": "assistant", "content": answer})
