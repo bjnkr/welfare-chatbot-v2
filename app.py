@@ -6,103 +6,99 @@ from google.genai import types
 import io
 from pypdf import PdfReader, PdfWriter
 
-# --- 1. 설정 및 보안 ---
-# Streamlit Cloud의 Secrets에서 API 키를 가져옵니다.
 API_KEY = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else "직접입력"
-
 st.set_page_config(page_title="bjn.kr 복지 챗봇", page_icon="🤖")
 
-# --- 2. 로컬에 저장된 DB 불러오기 ---
 @st.cache_resource
 def init_db():
-    db_path = "./welfare_backup" 
-    gemini_ef = GoogleGenerativeAiEmbeddingFunction(api_key=API_KEY)
-    db_client = chromadb.PersistentClient(path=db_path)
-    return db_client.get_collection(name="welfare_docs", embedding_function=gemini_ef)
+db_path = "./welfare_backup"
+gemini_ef = GoogleGenerativeAiEmbeddingFunction(api_key=API_KEY)
+db_client = chromadb.PersistentClient(path=db_path)
+return db_client.get_collection(name="welfare_docs", embedding_function=gemini_ef)
 
 try:
-    collection = init_db()
-    genai_client = genai.Client(api_key=API_KEY)
-    st.success("복지 지식 창고가 연결되었습니다!")
+collection = init_db()
+genai_client = genai.Client(api_key=API_KEY)
+st.success("통합 복지 지식 창고가 연결되었습니다!")
 except Exception as e:
-    st.error(f"DB 로드 실패: {e}")
+st.error(f"DB 로드 실패: {e}")
 
-# --- 3. 채팅 UI 구현 ---
 st.title("🤖 bjn.kr AI 복지 상담사")
-st.info("366페이지 분량의 2026년 복지 안내서를 학습했습니다.")
+st.info("국민기초생활보장 및 다양한 복지 안내서를 통합 학습했습니다.")
 
-# 대화 기록 저장용 세션 초기화
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+st.session_state.messages = []
 
-# 기존 대화 내용 화면에 출력
 for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
+st.chat_message(msg["role"]).write(msg["content"])
 
-# --- 4. 질문 입력 및 답변 생성 ---
-if prompt := st.chat_input("궁금한 복지 혜택을 물어보세요! (예: 3인가구 주거급여 얼마야?)"):
-    # 사용자가 입력한 질문 화면에 표시
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
-
-    # 챗봇 답변 영역
-    with st.chat_message("assistant"):
-        with st.spinner("지침서 원본을 꼼꼼히 읽고 있습니다... (약 3~5초 소요)"):
-            try:
-                # 1) 벡터 DB에서 관련 페이지 10장 검색
-                results = collection.query(query_texts=[prompt], n_results=10)
-                pages = [m['page_num'] for m in results['metadatas'][0]]
-                
-                # 2) 원본 PDF에서 해당 페이지만 쏙 뽑아내기
-                # ★ 중요: 깃허브에 올린 원본 PDF 파일 이름과 똑같이 적어주세요! ★
-                PDF_FILENAME = "국민기초생활보장.pdf" 
-                
-                reader = PdfReader(PDF_FILENAME)
-                writer = PdfWriter()
-                
-                # 검색된 페이지 번호에 해당하는 페이지만 추출
+if prompt := st.chat_input("궁금한 복지 혜택을 물어보세요!"):
+st.session_state.messages.append({"role": "user", "content": prompt})
+st.chat_message("user").write(prompt)
+with st.chat_message("assistant"):
+    with st.spinner("여러 지침서를 꼼꼼히 뒤적이고 있습니다..."):
+        try:
+            # 1. DB에서 관련 문구와 '출처 파일명(source)'을 함께 가져옵니다.
+            results = collection.query(query_texts=[prompt], n_results=10)
+            metadatas = results['metadatas'][0]
+            
+            # 2. 어떤 파일에서 몇 페이지를 가져올지 정리합니다.
+            files_to_pages = {}
+            for m in metadatas:
+                source_file = m['source']
+                page_num = m['page_num']
+                if source_file not in files_to_pages:
+                    files_to_pages[source_file] = []
+                files_to_pages[source_file].append(page_num)
+            
+            writer = PdfWriter()
+            
+            # 3. 필요한 책(PDF)들을 차례대로 펴서 해당 페이지만 찢어 모읍니다!
+            for source_file, pages in files_to_pages.items():
+                reader = PdfReader(source_file)
                 for page_num in pages:
-                    idx = int(page_num) - 1 # 파이썬은 0페이지부터 셈
+                    idx = int(page_num) - 1
                     if 0 <= idx < len(reader.pages):
                         writer.add_page(reader.pages[idx])
-                
-                # 추출한 페이지들을 메모리에 임시 저장 (바이트 변환)
-                pdf_bytes_io = io.BytesIO()
-                writer.write(pdf_bytes_io)
-                pdf_bytes = pdf_bytes_io.getvalue()
-                
-                # Gemini에게 보낼 수 있는 파일 형태로 묶기
-                pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
-                
-                # 3) Gemini에게 최종 답변 요청
-                response = genai_client.models.generate_content(
-                    model="gemini-2.5-flash",
-               contents=[
-                   pdf_part,
-                   f"""당신은 bjn.kr의 스마트 복지 챗봇입니다. 제공된 PDF 문서를 바탕으로 아래 지침을 엄격히 지켜 답변하세요.
+            
+            pdf_bytes_io = io.BytesIO()
+            writer.write(pdf_bytes_io)
+            pdf_bytes = pdf_bytes_io.getvalue()
+            
+            pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+            
+            response = genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    pdf_part,
+                    f"""당신은 bjn.kr의 스마트 복지 챗봇입니다. 제공된 PDF 문서를 바탕으로 아래 지침을 엄격히 지켜 답변하세요.
+            1.길이 자동 조절:
 
-               1. 길이 자동 조절: 
-                  - 단순 확인 질문(예/아니오, 특정 금액, 날짜 등): 서론 없이 핵심 정답만 2~3문장 이내로 아주 짧고 명확하게 답변하세요.
-                  - 복잡한 질문(절차, 조건, 이유 등): 상세히 설명하되, 반드시 글머리 기호(-, *)를 사용하여 모바일에서 읽기 편하게 요약하세요.
-               2. 금지 사항: "안녕하세요", "복지 전문가입니다", "질문 주신 내용에 대해 설명해 드리겠습니다" 같은 불필요한 인사말과 기계적인 서론/결론은 절대 쓰지 마세요.
-               3. 명확성: 조건에 따라 결과가 달라지는 경우, 사용자가 어떤 선택을 해야 하는지 명확한 가이드라인만 제시하세요.
+            2.단순 확인 질문: 서론 없이 핵심 정답만 2~3문장 이내로 아주 짧고 명확하게 답변하세요.
 
-               질문: {prompt}"""
-               ]
-                )
-                
-                # 4) 화면에 결과 출력
-                answer = response.text
-                st.write(answer)
-                
-                # 참고한 페이지 번호 보기 좋게 정렬해서 하단에 표시
-                unique_pages = sorted(list(set([int(p) for p in pages])))
-                st.caption(f"📍 참고 페이지: {', '.join(map(str, unique_pages))}페이지")
-                
-                # 대화 기록에 챗봇 답변 저장
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-                
-            except FileNotFoundError:
-                st.error(f"🚨 오류: 깃허브 저장소에 '{PDF_FILENAME}' 파일이 업로드되어 있지 않습니다! 파일을 꼭 함께 올려주세요.")
-            except Exception as e:
-                st.error(f"🚨 실행 중 오류가 발생했습니다: {e}")           
+            3.복잡한 질문: 상세히 설명하되, 반드시 글머리 기호(-, *)를 사용하여 모바일에서 읽기 편하게 요약하세요.
+
+            4.금지 사항: "안녕하세요", "복지 전문가입니다" 등 불필요한 인사말과 기계적인 서론/결론은 절대 쓰지 마세요.
+
+            5.명확성: 조건에 따라 결과가 달라지는 경우 명확한 가이드라인만 제시하세요.
+            질문: {prompt}"""
+            ]
+            )
+
+         answer = response.text
+         st.write(answer)
+
+         # 4. 어떤 파일의 몇 페이지를 참고했는지 예쁘게 출력합니다.
+         ref_text = []
+         for source_file, pages in files_to_pages.items():
+             unique_pages = sorted(list(set([int(p) for p in pages])))
+             ref_text.append(f"{source_file} ({', '.join(map(str, unique_pages))}p)")
+
+         st.caption(f"📍 참고 문서: {' / '.join(ref_text)}")
+
+         st.session_state.messages.append({"role": "assistant", "content": answer})
+
+     except FileNotFoundError as fnfe:
+         st.error(f"🚨 깃허브에 파일이 없습니다: {fnfe}")
+     except Exception as e:
+         st.error(f"🚨 오류가 발생했습니다: {e}")
