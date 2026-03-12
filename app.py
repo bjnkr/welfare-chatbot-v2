@@ -11,10 +11,10 @@ st.set_page_config(page_title="bjn.kr 복지 챗봇", page_icon="🤖")
 
 @st.cache_resource
 def init_db():
-db_path = "./welfare_backup"
-gemini_ef = GoogleGenerativeAiEmbeddingFunction(api_key=API_KEY)
-db_client = chromadb.PersistentClient(path=db_path)
-return db_client.get_collection(name="welfare_docs", embedding_function=gemini_ef)
+  db_path = "./welfare_backup"
+  gemini_ef = GoogleGenerativeAiEmbeddingFunction(api_key=API_KEY)
+  db_client = chromadb.PersistentClient(path=db_path)
+  return db_client.get_collection(name="welfare_docs", embedding_function=gemini_ef)
 
 try:
 collection = init_db()
